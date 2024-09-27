@@ -4,7 +4,7 @@
 # Maintainer: [NAZY-OS]
 # This script kills all processes that match the given program names.
 
-# Usage: killall-ng <program-name>
+# Usage: suway-ng <program-name>
 
 # Get PID of process related to $1, excluding the current grep process
 PID=$(ps -ef | grep -E "suway $1" | grep -v grep | head --lines=-1 | awk '{print $2}')
