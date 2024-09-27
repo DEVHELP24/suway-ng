@@ -1,0 +1,221 @@
+#!/bin/bash
+
+# SPDX-License-Identifier: MIT
+# Maintainer: [NAZY-OS]
+# This script kills all processes that match the given program names.
+
+# Usage: killall-ng <program-name>
+
+# Get PID of process related to $1, excluding the current grep process
+PID=$(ps -ef | grep -E "suway $1" | grep -v grep | head --lines=-1 | awk '{print $2}')
+
+# Parameters and environment variables
+parameter="$@"
+myxcookie="${HOME}/my-x-cookie"
+export DISPLAY=$DISPLAY
+cmd_let_xhost="xauth merge ${myxcookie};env DISPLAY=$DISPLAY $parameter"
+main_programm="$1"
+
+# Function to create and configure X authentication
+function xauth_create {
+   export DISPLAY=$DISPLAY
+   touch "${HOME}/.Xauthority"
+
+   # Generate a magic cookie for X authentication
+   xauth add "$(uname -n)${DISPLAY}" . "$(xxd -l 16 -p /dev/urandom)"
+   xauth extract "${myxcookie}" "$(uname -n)${DISPLAY}" &> /dev/null
+   setfacl -m u:${USER}:r "${myxcookie}"
+   xauth merge "${myxcookie}"
+   
+   # Run the command with su and return the result
+   echo "${PASSWORD}" | su -c "${cmd_let_xhost}" && true || false
+}
+
+# Function to create X authentication for sudo
+function xauth_create_sudo {
+   export DISPLAY=${DISPLAY}
+   touch "${HOME}/.Xauthority"
+
+   # Generate a magic cookie for X authentication
+   xauth add "$(uname -n):0" . "$(xxd -l 16 -p /dev/urandom)"
+   xauth extract "${myxcookie}" "$(uname -n)${DISPLAY}" &> /dev/null
+   setfacl -m u:${USER}:r "${myxcookie}"
+   xauth merge "${myxcookie}"
+   
+   # Run the command with sudo and return the result
+   sudo -E bash -c "${cmd_let_xhost}" && true || false
+}
+
+# Function to securely read the passphrase
+function read_pass {
+   while true; do
+      # Kill any running instances of the virtual keyboard
+      kill $(ps -aux | grep -v grep | grep -E "wvkbd-mobintl -L 220" | awk '{print $2}') &> /dev/null
+      bash -c "wvkbd-mobintl -L 220 2> /dev/null &" 2> /dev/null
+      
+      printf "[))> Enter passphrase: "
+      PASSWORD=""
+      PROMPT=""
+      CHARCOUNT=0
+
+      # Read input securely, character by character
+      while IFS= read -p "$PROMPT" -r -s -n 1 CHAR; do
+         if [[ $CHAR == $'\0' ]]; then
+            stty echo
+            break
+         fi
+         if [[ $CHAR == $'\177' ]]; then  # Backspace
+            if [[ $CHARCOUNT -gt 0 ]]; then
+               CHARCOUNT=$((CHARCOUNT-1))
+               PROMPT=$'\b \b'
+               PASSWORD="${PASSWORD%?}"
+               stty echo
+            else
+               PROMPT=''
+               stty echo
+            fi
+         else
+            stty -echo
+            CHARCOUNT=$((CHARCOUNT+1))
+            PROMPT='*'
+            PASSWORD+="$CHAR"
+         fi
+      done
+
+      echo
+      
+      # Test if the passphrase works, break if successful
+      echo "${PASSWORD}" | su -c "printf laa" &> /dev/null && \
+      kill $(ps -aux | grep -v grep | grep -E "wvkbd-mobintl -L 220" | awk '{print $2}') &> /dev/null && \
+      printf '\n\n*** Starting program with suway!!\n' && break
+   done
+}
+
+# Function to run using xauth
+function xhost_run {
+   xauth_create && succeed || fatal
+}
+
+# Function to run using sudo with environment variables
+function sudo-env_run {
+   OUTPUT=$(sudo -E $parameter | tee /dev/tty)
+   if [[ $? -eq 0 ]]; then
+      succeed
+   else
+      echo "$OUTPUT" | grep -E 'Qt' &> /dev/null && qt_warn
+      echo "$OUTPUT" | grep -E 'cannot open display:' &> /dev/null && x11_warn
+      false
+   fi
+}
+
+# Function to run sudo with xauth and environment variables
+function sudo_xhost-env_run {
+   xauth_create_sudo && succeed || false
+}
+
+# Function for success
+function succeed {
+   echo
+   echo "[))> suway execution finished with no errors!"
+   echo
+   stty echo
+   exit 0
+}
+
+# Warning for Qt issues
+function qt_warn {
+   echo
+   echo "[))> No Qt platform plugin could be initialized!"
+   echo " ~> Trying running the command via xhost fallback method!"
+   echo
+}
+
+# Warning for X11 display issues
+function x11_warn {
+   echo
+   echo "[))> No X11 display is set!"
+   echo
+}
+
+# Function for clean exit on Ctrl+C
+function ctrl_exit {
+   stty echo
+   kill $(ps -aux | grep -v grep | grep -E "wvkbd-mobintl -L 220" | awk '{print $2}') &> /dev/null
+   echo
+   echo "suway closed!!"
+   stty echo && exit 0
+}
+
+# Function for fatal errors
+function fatal {
+   echo
+   echo "[))> suway execution encountered an issue!"
+   echo
+   echo -e " ~> Please contact the developer of $main_programm!\n  Ask to fix the sudo execution in Wayland-based Desktop environments!"
+   echo
+   stty echo
+   exit 1
+}
+
+# Function for command not found
+function not_found {
+   echo
+   echo "[))> Command $main_programm is not found!"
+   echo
+   stty echo
+   exit 1
+}
+
+# Check for missing dependencies
+function missing_dependencies {
+   which xauth &> /dev/null
+   if [[ $? -ne 0 ]]; then
+      echo
+      echo "To use suway, please install xorg-xauth!"
+      echo
+      stty echo
+      exit 1
+   fi
+}
+
+#######################################################
+#####  Main process starts here  #####
+#######################################################
+
+trap ctrl_exit INT  # Trap Ctrl+C to exit cleanly
+
+export QT_QPA_PLATFORMTHEME="qt5ct"
+export QT_QPA_PLATFORM="wayland;xcb"
+export WAYLAND_DISPLAY="$(find $XDG_RUNTIME_DIR/wayland-* | grep -v '.lock')"
+
+# Check for missing dependencies
+missing_dependencies
+
+# Check if a main program was provided
+if [[ -z $main_programm ]]; then
+   echo "[))> No program found to run with suway!"
+   echo
+   stty echo
+   exit 1
+fi
+
+# Check if the program exists in the system
+which $main_programm &> /dev/null || not_found
+
+echo
+echo "suway PID: $PID"
+echo
+
+# Check if sudo is available
+if ! which sudo &> /dev/null; then
+   printf "[))> No sudo is installed.\n\nIf you want better runtime performance, you should install sudo!\n\nFallback to using slower xhost localuser method!\n"
+   xhost_run
+fi
+
+# Read password and attempt to run the program
+read_pass
+sudo-env_run || xhost_run
+
+# Clear sensitive variables
+unset PASSWORD
+unset main_programm
