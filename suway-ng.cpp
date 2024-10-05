@@ -16,8 +16,8 @@
 #include <vector>
 #include <termios.h>
 #include <sys/stat.h>
-#include <X11/Xauth.h>
 #include <X11/Xlib.h>
+#include <X11/Xauth.h>
 #include <fstream>
 #include <openssl/rand.h> // Include for RAND_bytes
 
@@ -100,7 +100,7 @@ void manage_xauth(const std::string& cookie_path) {
     }
 
     // Create and configure XAuth
-    XAuth* auth = XAllocAuth();
+    Xauth* auth = XAllocAuth();
     if (!auth) {
         throw std::runtime_error("Failed to allocate XAuth structure");
     }
@@ -108,15 +108,13 @@ void manage_xauth(const std::string& cookie_path) {
     auth->family = FamilyLocal;
     auth->number = display_num;
     auth->name_length = display_name.length();
-    auth->name = reinterpret_cast<BYTE*>(const_cast<char*>(display_name.c_str()));
+    auth->name = reinterpret_cast<unsigned char*>(const_cast<char*>(display_name.c_str()));
     auth->data_length = sizeof(cookie);
     auth->data = cookie;
 
     // Write the cookie to the Xauthority file
     FILE* xauth_file = fopen(cookie_path.c_str(), "a");
     if (xauth_file) {
-        // Use XauFileName to handle authority file correctly
-        const char* xauth_filename = XauFileName();
         XauWriteAuth(xauth_file, auth); // Write the cookie to the file
         fclose(xauth_file);
     } else {
