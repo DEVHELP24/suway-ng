@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Maintainer: NAZY-OS
-// This program runs a specified command with root privileges after prompting for a password.
-// It utilizes X11 authentication and handles user input securely.
+// This program executes a specified command with root privileges after prompting for a password.
+// It utilizes X11 authentication and manages user input securely.
 
 #include <iostream>
 #include <cstdlib>
@@ -51,18 +51,18 @@ std::string read_password() {
 
 // Function to execute a command
 void execute_command(const std::vector<std::string>& cmd) {
-    pid_t pid = fork();
+    pid_t pid = fork(); // Create a new process
     if (pid == 0) {
         // In child process, execute the command
         std::vector<char*> argv;
         for (const auto& arg : cmd) {
-            argv.push_back(const_cast<char*>(arg.c_str()));
+            argv.push_back(const_cast<char*>(arg.c_str())); // Convert string to char*
         }
         argv.push_back(nullptr); // Last argument must be nullptr
-        execvp(argv[0], argv.data());
+        execvp(argv[0], argv.data()); // Execute the command
         // If execvp fails
         perror("execvp failed");
-        exit(EXIT_FAILURE);
+        exit(EXIT_FAILURE); // Exit child process with failure
     } else if (pid < 0) {
         // Fork failed
         perror("fork failed");
@@ -80,7 +80,7 @@ void execute_command(const std::vector<std::string>& cmd) {
 // Function to manage X11 authentication
 void manage_xauth(const std::string& cookie_path) {
     // Create or update .Xauthority
-    Display* display = XOpenDisplay(nullptr);
+    Display* display = XOpenDisplay(nullptr); // Open X display
     if (!display) {
         throw std::runtime_error("Unable to open X display");
     }
@@ -90,7 +90,7 @@ void manage_xauth(const std::string& cookie_path) {
     std::string display_name = ":0"; // Modify as needed
 
     // Generate a random X cookie
-    unsigned char cookie[16];
+    unsigned char cookie[16]; // Size of cookie
     if (RAND_bytes(cookie, sizeof(cookie)) != 1) {
         throw std::runtime_error("Failed to generate X cookie");
     }
@@ -101,34 +101,35 @@ void manage_xauth(const std::string& cookie_path) {
         throw std::runtime_error("Failed to allocate XAuth structure");
     }
 
-    auth->family = FamilyLocal;  // Set the family (e.g., Local)
-    auth->number = display_num;   // Set display number (typically 0)
-    auth->name_length = display_name.length();  // Length of display name
-    auth->name = reinterpret_cast<unsigned char*>(const_cast<char*>(display_name.c_str()));  // Display name
-    auth->data_length = sizeof(cookie);  // Length of cookie
-    auth->data = cookie;  // The cookie itself
+    // Configure the XAuth structure
+    auth->family = FamilyLocal; // Set the family (e.g., Local)
+    auth->number = display_num;  // Set display number (typically 0)
+    auth->name_length = display_name.length(); // Length of display name
+    auth->name = reinterpret_cast<unsigned char*>(const_cast<char*>(display_name.c_str())); // Display name
+    auth->data_length = sizeof(cookie); // Length of cookie
+    auth->data = cookie; // The cookie itself
 
     // Write the cookie to the Xauthority file
-    FILE* xauth_file = fopen(cookie_path.c_str(), "a");
+    FILE* xauth_file = fopen(cookie_path.c_str(), "a"); // Open X authority file
     if (xauth_file) {
         XauWriteAuth(xauth_file, auth); // Write the cookie to the file
-        fclose(xauth_file);
+        fclose(xauth_file); // Close the file
     } else {
         throw std::runtime_error("Failed to open X authority file");
     }
 
-    XFree(auth);
-    XCloseDisplay(display);
+    XFree(auth); // Free the XAuth structure
+    XCloseDisplay(display); // Close the display
 }
 
 // Function to check if a command exists in the PATH
 bool command_exists(const std::string& cmd) {
-    return system(("command -v " + cmd + " > /dev/null 2>&1").c_str()) == 0;
+    return system(("command -v " + cmd + " > /dev/null 2>&1").c_str()) == 0; // Check if command exists
 }
 
 // Main function
 int main(int argc, char* argv[]) {
-    // Check if the program is executed in the correct environment
+    // Check if the program is executed with a command
     if (argc < 2) {
         std::cerr << "[))> No program found to run!" << std::endl;
         return EXIT_FAILURE;
@@ -146,11 +147,11 @@ int main(int argc, char* argv[]) {
     std::string password = read_password();
 
     // Manage X11 authentication
-    std::string cookie_path = std::string(getenv("HOME")) + "/.Xauthority";
-    manage_xauth(cookie_path);
+    std::string cookie_path = std::string(getenv("HOME")) + "/.Xauthority"; // Set cookie path
+    manage_xauth(cookie_path); // Manage X authority
 
-    // Prepare command to run without sudo
-    std::vector<std::string> command = {program}; // Removed sudo
+    // Prepare command to run with root privileges
+    std::vector<std::string> command = {"sudo", program}; // Command to execute with sudo
 
     // Execute the command
     try {
@@ -161,5 +162,5 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    return EXIT_SUCCESS;
+    return EXIT_SUCCESS; // Successful execution
 }
