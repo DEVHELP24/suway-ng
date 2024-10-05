@@ -7,7 +7,8 @@ this tool is on the early phase... and the first Beta version ( v0.95)
 -- Please report issues or pull requests to support this tool!
 
 
-g++ suway-ng.cpp -o suway-ng -lX11 -lXau -lcrypto
+g++ suway-ng.cpp -o suway-ng -lX11 -lXau -lssl -lcrypto
+
 
 
 deps
