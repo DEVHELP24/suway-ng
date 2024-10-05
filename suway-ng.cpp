@@ -115,7 +115,8 @@ void manage_xauth(const std::string& cookie_path) {
     // Write the cookie to the Xauthority file
     FILE* xauth_file = fopen(cookie_path.c_str(), "a");
     if (xauth_file) {
-        XauFileName = cookie_path.c_str(); // Set the authority file name
+        // Use XauFileName to handle authority file correctly
+        const char* xauth_filename = XauFileName();
         XauWriteAuth(xauth_file, auth); // Write the cookie to the file
         fclose(xauth_file);
     } else {
