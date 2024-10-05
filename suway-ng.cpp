@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Maintainer: [NAZY-OS]
+// Maintainer: NAZY-OS
 // This program runs a specified command with root privileges after prompting for a password.
 // It utilizes X11 authentication and handles user input securely.
 
@@ -9,16 +9,12 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <signal.h>
-#include <fcntl.h>
 #include <stdexcept>
 #include <string>
 #include <vector>
 #include <termios.h>
-#include <sys/stat.h>
 #include <X11/Xlib.h>
 #include <X11/Xauth.h>
-#include <fstream>
 #include <openssl/rand.h> // Include for RAND_bytes
 
 // Function to read password securely with asterisks for each character entered
@@ -153,8 +149,8 @@ int main(int argc, char* argv[]) {
     std::string cookie_path = std::string(getenv("HOME")) + "/.Xauthority";
     manage_xauth(cookie_path);
 
-    // Prepare command to run with root privileges
-    std::vector<std::string> command = {"sudo", program};
+    // Prepare command to run without sudo
+    std::vector<std::string> command = {program}; // Removed sudo
 
     // Execute the command
     try {
