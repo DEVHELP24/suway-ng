@@ -1,18 +1,7 @@
 // SPDX-License-Identifier: MIT
-// Maintainer: [NAZY-OS]
-// 
-// This program allows the user to run a specified command after securely prompting 
-// for a password. It utilizes X11 authentication to manage access and handles 
-// user input securely, ensuring passwords are not echoed to the terminal. 
-// The program is designed to be executed in a terminal environment where 
-// the specified command can be run without root privileges.
-// 
-// Dependencies: 
-// - xauth: Ensure that this utility is installed on your system.
-// 
-// Usage: 
-// Compile the program and run it with the command you wish to execute as an argument.
-// Example: ./suway-ng <command>
+// Maintainer: NAZY-OS
+// This program prompts the user for a password and checks it against the stored hash in /etc/shadow.
+// It utilizes secure password input and X11 authentication to manage access control.
 
 #include <iostream>
 #include <cstdlib>
@@ -31,11 +20,12 @@
 #include <X11/Xauth.h>
 #include <fstream>
 #include <openssl/rand.h> // Include for RAND_bytes
+#include <crypt.h> // Include for crypt() function
 
 // Function to read password securely with asterisks for each character entered
 std::string read_password() {
-    struct termios oldt, newt; // For terminal settings
-    std::string password; // To store the password
+    struct termios oldt, newt;
+    std::string password;
 
     // Get the current terminal settings
     tcgetattr(STDIN_FILENO, &oldt);
@@ -43,50 +33,93 @@ std::string read_password() {
     newt.c_lflag &= ~(ECHO); // Disable echoing
     tcsetattr(STDIN_FILENO, TCSANOW, &newt); // Apply new settings
 
-    std::cout << "[))> Enter passphrase: "; // Prompt for password input
+    std::cout << "[))> Enter passphrase: ";
 
     char ch;
-    while (std::cin.get(ch) && ch != '\n') { // Read input until newline
-        if (ch == 127) { // Handle backspace
+    while (std::cin.get(ch) && ch != '\n') {
+        if (ch == 127) { // Backspace
             if (!password.empty()) {
-                password.pop_back(); // Remove last character from password
-                std::cout << "\b \b"; // Erase last asterisk from display
+                password.pop_back();
+                std::cout << "\b \b"; // Remove the last asterisk
             }
         } else {
-            password += ch; // Add character to password
+            password += ch;
             std::cout << '*'; // Show asterisk for each character
         }
     }
-    std::cout << std::endl; // New line after password input
+    std::cout << std::endl;
 
     // Restore old terminal settings
     tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
-    return password; // Return the password entered
+    return password;
+}
+
+// Function to check the provided password against the user's hashed password
+bool check_password(const std::string& input_password) {
+    // Get the username of the current user
+    const char* username = getenv("USER");
+    if (!username) {
+        std::cerr << "[))> Error: Unable to get the username." << std::endl;
+        return false;
+    }
+
+    // Open the shadow file
+    std::ifstream shadow_file("/etc/shadow");
+    if (!shadow_file.is_open()) {
+        std::cerr << "[))> Error: Unable to open /etc/shadow." << std::endl;
+        return false;
+    }
+
+    std::string line;
+    std::string hashed_password;
+
+    // Read through the shadow file to find the current user's entry
+    while (std::getline(shadow_file, line)) {
+        if (line.substr(0, line.find(':')) == username) {
+            // The hashed password is the second field in the line
+            hashed_password = line.substr(line.find(':') + 1, line.find(':', line.find(':') + 1) - line.find(':') - 1);
+            break;
+        }
+    }
+
+    shadow_file.close();
+
+    if (hashed_password.empty()) {
+        std::cerr << "[))> Error: No entry found for user " << username << "." << std::endl;
+        return false;
+    }
+
+    // Hash the input password and compare it to the stored hashed password
+    char* hashed_input = crypt(input_password.c_str(), hashed_password.c_str());
+
+    // Check if the stored hash matches the hashed input
+    return (hashed_input && strcmp(hashed_input, hashed_password.c_str()) == 0); // Compare the strings
 }
 
 // Function to execute a command
 void execute_command(const std::vector<std::string>& cmd) {
-    pid_t pid = fork(); // Create a new process
+    pid_t pid = fork();
     if (pid == 0) {
         // In child process, execute the command
-        std::vector<char*> argv; // Vector to hold command arguments
+        std::vector<char*> argv;
         for (const auto& arg : cmd) {
-            argv.push_back(const_cast<char*>(arg.c_str())); // Convert string to char*
+            argv.push_back(const_cast<char*>(arg.c_str()));
         }
         argv.push_back(nullptr); // Last argument must be nullptr
-        execvp(argv[0], argv.data()); // Execute the command
-        perror("execvp failed"); // If execvp fails
-        exit(EXIT_FAILURE); // Exit child process on failure
+        execvp(argv[0], argv.data());
+        // If execvp fails
+        perror("execvp failed");
+        exit(EXIT_FAILURE);
     } else if (pid < 0) {
         // Fork failed
         perror("fork failed");
-        exit(EXIT_FAILURE); // Exit if fork fails
+        exit(EXIT_FAILURE);
     } else {
         // In parent process, wait for the child to finish
         int status;
-        waitpid(pid, &status, 0); // Wait for the child process to complete
+        waitpid(pid, &status, 0);
         if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-            throw std::runtime_error("Command execution failed"); // Handle execution failure
+            throw std::runtime_error("Command execution failed");
         }
     }
 }
@@ -94,7 +127,7 @@ void execute_command(const std::vector<std::string>& cmd) {
 // Function to manage X11 authentication
 void manage_xauth(const std::string& cookie_path) {
     // Create or update .Xauthority
-    Display* display = XOpenDisplay(nullptr); // Open the X display
+    Display* display = XOpenDisplay(nullptr);
     if (!display) {
         throw std::runtime_error("Unable to open X display");
     }
@@ -126,54 +159,60 @@ void manage_xauth(const std::string& cookie_path) {
     FILE* xauth_file = fopen(cookie_path.c_str(), "a");
     if (xauth_file) {
         XauWriteAuth(xauth_file, auth); // Write the cookie to the file
-        fclose(xauth_file); // Close the file after writing
+        fclose(xauth_file);
     } else {
         throw std::runtime_error("Failed to open X authority file");
     }
 
-    XFree(auth); // Free the allocated Xauth structure
-    XCloseDisplay(display); // Close the display
+    XFree(auth);
+    XCloseDisplay(display);
 }
 
 // Function to check if a command exists in the PATH
 bool command_exists(const std::string& cmd) {
-    return system(("command -v " + cmd + " > /dev/null 2>&1").c_str()) == 0; // Check if command exists
+    return system(("command -v " + cmd + " > /dev/null 2>&1").c_str()) == 0;
 }
 
 // Main function
 int main(int argc, char* argv[]) {
-    // Check if the program is executed in the correct environment
+    // Check if the program is executed with a command to run
     if (argc < 2) {
-        std::cerr << "[))> No program found to run!" << std::endl; // Error if no command provided
+        std::cerr << "[))> No program found to run!" << std::endl;
         return EXIT_FAILURE;
     }
 
-    std::string program = argv[1]; // Get the program to run from arguments
+    std::string program = argv[1];
 
     // Check if the required commands exist
     if (!command_exists("xauth")) {
-        std::cerr << "[))> Missing dependency: xauth" << std::endl; // Error if xauth is missing
+        std::cerr << "[))> Missing dependency: xauth" << std::endl;
         return EXIT_FAILURE;
     }
 
     // Read password securely
     std::string password = read_password();
 
-    // Manage X11 authentication
-    std::string cookie_path = std::string(getenv("HOME")) + "/.Xauthority"; // Path to Xauthority
-    manage_xauth(cookie_path); // Manage X11 authentication
+    // Check the password against the user's hashed password in /etc/shadow
+    if (!check_password(password)) {
+        std::cerr << "[))> Error: Incorrect password." << std::endl;
+        return EXIT_FAILURE;
+    }
 
-    // Prepare command to run directly
-    std::vector<std::string> command = {program}; // Prepare command vector
+    // Manage X11 authentication
+    std::string cookie_path = std::string(getenv("HOME")) + "/.Xauthority";
+    manage_xauth(cookie_path);
+
+    // Prepare command to run without sudo
+    std::vector<std::string> command = {program};
 
     // Execute the command
     try {
-        execute_command(command); // Execute the command
-        std::cout << "[))> Execution finished with no errors!" << std::endl; // Success message
+        execute_command(command);
+        std::cout << "[))> Execution finished with no errors!" << std::endl;
     } catch (const std::runtime_error& e) {
-        std::cerr << "[))> Error: " << e.what() << std::endl; // Catch and display errors
-        return EXIT_FAILURE; // Exit on error
+        std::cerr << "[))> Error: " << e.what() << std::endl;
+        return EXIT_FAILURE;
     }
 
-    return EXIT_SUCCESS; // Exit successfully
+    return EXIT_SUCCESS;
 }
