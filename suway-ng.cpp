@@ -25,7 +25,7 @@
 
 // Function to read password securely with asterisks for each character entered
 std::string read_password() {
-    struct termios oldt, newt;
+    struct termios oldt, newt; // Struct to manage terminal settings
     std::string password;
 
     // Get the current terminal settings
@@ -57,7 +57,7 @@ std::string read_password() {
 
 // Function to execute a command
 void execute_command(const std::vector<std::string>& cmd) {
-    pid_t pid = fork();
+    pid_t pid = fork(); // Create a new process
     if (pid == 0) {
         // In child process, execute the command
         std::vector<char*> argv;
@@ -96,7 +96,7 @@ void manage_xauth(const std::string& cookie_path) {
     std::string display_name = ":0"; // Modify as needed
 
     // Generate a random X cookie
-    unsigned char cookie[16];
+    unsigned char cookie[16]; // Correctly typed for the cookie
     if (RAND_bytes(cookie, sizeof(cookie)) != 1) {
         throw std::runtime_error("Failed to generate X cookie");
     }
