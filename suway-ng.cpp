@@ -24,6 +24,8 @@
 #include <pwd.h>
 #include <wayland-client.h>
 
+const int MAX_PASSWORD_LENGTH = 128; // Maximum password length
+
 // Function to read password securely with asterisks for each character entered
 std::string read_password() {
     struct termios oldt, newt;
@@ -45,8 +47,13 @@ std::string read_password() {
                 std::cout << "\b \b"; // Remove the last asterisk
             }
         } else {
-            password += ch;
-            std::cout << '*'; // Show asterisk for each character
+            if (password.length() < MAX_PASSWORD_LENGTH) { // Limit password length
+                password += ch;
+                std::cout << '*'; // Show asterisk for each character
+            } else {
+                std::cout << "\n[))> Password is too long, maximum length is " << MAX_PASSWORD_LENGTH << " characters." << std::endl;
+                break;
+            }
         }
     }
     std::cout << std::endl;
