@@ -3,14 +3,18 @@
 #include <cstdlib>
 #include <cstring>
 #include <unistd.h>
-#include <sys/types.h>
-#include <pwd.h>
-#include <sys/stat.h>
-#include <fcntl.h>
+#include <limits.h>
 
 #ifdef __unix__
 #include <xauth.h>
 #endif
+
+/*
+ * This program is designed to be placed in the /sbin folder.
+ * It executes commands directly without using sudo, so ensure 
+ * that the necessary permissions are granted for the commands 
+ * you intend to run.
+ */
 
 // Function to securely read the password with asterisks
 std::string readPassword() {
@@ -38,7 +42,6 @@ std::string readPassword() {
 
 // Function to create X11 authentication
 bool createXAuth() {
-    // Assume .Xauthority is already created
     if (system("xauth add $(uname -n):0 . $(xxd -l 16 -p /dev/urandom)") != 0) {
         std::cerr << "[!!] Failed to create X11 authentication." << std::endl;
         return false;
@@ -46,37 +49,56 @@ bool createXAuth() {
     return true;
 }
 
-// Function to run the command with sudo
-bool runWithSudo(const std::string& command, const std::string& password) {
-    std::string cmd = "echo " + password + " | sudo -S " + command;
-    return system(cmd.c_str()) == 0;
+// Function to validate the command input
+bool isCommandValid(const std::string& command) {
+    // Check for disallowed characters to prevent command injection
+    return command.find(';') == std::string::npos && command.find('&') == std::string::npos;
+}
+
+// Function to run the command
+bool runCommand(const std::string& command) {
+    // Run the command directly without sudo
+    return system(command.c_str()) == 0;
 }
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cerr << "[!!] No program found to run with suway!" << std::endl;
+        std::cerr << "[!!] No program found to run!" << std::endl;
         return 1;
     }
 
     std::string command = argv[1];
 
     // Validate the command to prevent injection
-    if (command.find(';') != std::string::npos || command.find('&') != std::string::npos) {
+    if (!isCommandValid(command)) {
         std::cerr << "[!!] Invalid command!" << std::endl;
+        return 1;
+    }
+
+    // Set up Wayland or X11 environment variables
+    const char* display = getenv("DISPLAY");
+    const char* wayland_display = getenv("WAYLAND_DISPLAY");
+
+    if (display) {
+        std::cout << "[))> Using X11 display: " << display << std::endl;
+    } else if (wayland_display) {
+        std::cout << "[))> Using Wayland display: " << wayland_display << std::endl;
+    } else {
+        std::cerr << "[!!] No display server found. Exiting." << std::endl;
         return 1;
     }
 
     // Read password securely
     std::string password = readPassword();
 
-    // Create X11 authentication
-    if (!createXAuth()) {
+    // Create X11 authentication (if using X11)
+    if (display && !createXAuth()) {
         return 1;
     }
 
-    // Run the command with sudo
-    if (!runWithSudo(command, password)) {
-        std::cerr << "[!!] Failed to run the command with sudo." << std::endl;
+    // Run the command without sudo
+    if (!runCommand(command)) {
+        std::cerr << "[!!] Failed to run the command." << std::endl;
         return 1;
     }
 
