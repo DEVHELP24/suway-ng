@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Maintainer: NAZY-OS
-// This program runs a specified command with user privileges after prompting for a password.
-// It utilizes X11 authentication and handles user input securely, including support for Wayland.
+// This program manages X11 authentication and securely runs a command with user privileges.
+// The goal is to authenticate and execute commands without using sudo, securely handling 
+// user passwords and integrating Wayland where possible.
 
 #include <iostream>
 #include <cstdlib>
@@ -18,61 +19,76 @@
 #include <termios.h>
 #include <X11/Xlib.h>
 #include <X11/Xauth.h>
-#include <fstream>
 #include <openssl/rand.h>
+#include <fstream>
+#include <shadow.h>
+#include <crypt.h>
 
-// Function to read password securely with asterisks for each character entered
+// Function to securely read password with asterisks displayed on input
 std::string read_password() {
     struct termios oldt, newt;
     std::string password;
 
-    // Get the current terminal settings
+    // Disable terminal echoing while reading the password
     tcgetattr(STDIN_FILENO, &oldt);
     newt = oldt;
-    newt.c_lflag &= ~(ECHO); // Disable echoing
-    tcsetattr(STDIN_FILENO, TCSANOW, &newt); // Apply new settings
+    newt.c_lflag &= ~(ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
 
     std::cout << "[))> Enter passphrase: ";
 
     char ch;
     while (std::cin.get(ch) && ch != '\n') {
-        if (ch == 127) { // Backspace
+        if (ch == 127 || ch == '\b') {  // Handle backspace
             if (!password.empty()) {
                 password.pop_back();
-                std::cout << "\b \b"; // Remove the last asterisk
+                std::cout << "\b \b"; // Remove last asterisk
             }
         } else {
             password += ch;
-            std::cout << '*'; // Show asterisk for each character
+            std::cout << '*';  // Print asterisk
         }
     }
     std::cout << std::endl;
 
-    // Restore old terminal settings
+    // Restore terminal settings
     tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
     return password;
 }
 
-// Function to execute a command
+// Function to validate the provided password with the system's /etc/shadow hashed password
+bool validate_password(const std::string& username, const std::string& password) {
+    struct spwd* pw = getspnam(username.c_str());
+    if (!pw) {
+        std::cerr << "[))> Error: User not found in shadow file." << std::endl;
+        return false;
+    }
+
+    // Compare the provided password with the hashed one from the shadow file
+    char* encrypted = crypt(password.c_str(), pw->sp_pwdp);
+    return encrypted && strcmp(encrypted, pw->sp_pwdp) == 0;
+}
+
+// Function to execute a command passed by the user
 void execute_command(const std::vector<std::string>& cmd) {
     pid_t pid = fork();
     if (pid == 0) {
-        // In child process, execute the command
+        // In child process, prepare to execute the command
         std::vector<char*> argv;
         for (const auto& arg : cmd) {
             argv.push_back(const_cast<char*>(arg.c_str()));
         }
-        argv.push_back(nullptr); // Last argument must be nullptr
-        execvp(argv[0], argv.data());
-        // If execvp fails
+        argv.push_back(nullptr);  // Terminate the arguments list with nullptr
+
+        execvp(argv[0], argv.data());  // Execute the command
         perror("execvp failed");
         exit(EXIT_FAILURE);
     } else if (pid < 0) {
-        // Fork failed
+        // Handle fork failure
         perror("fork failed");
         exit(EXIT_FAILURE);
     } else {
-        // In parent process, wait for the child to finish
+        // In parent process, wait for the child to finish execution
         int status;
         waitpid(pid, &status, 0);
         if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
@@ -81,23 +97,8 @@ void execute_command(const std::vector<std::string>& cmd) {
     }
 }
 
-// Function to ensure the home directory exists
-void ensure_home_directory(const std::string& home_path) {
-    struct stat st;
-    if (stat(home_path.c_str(), &st) != 0) {
-        // Directory does not exist; create it
-        if (mkdir(home_path.c_str(), 0700) != 0) {
-            throw std::runtime_error("Failed to create home directory: " + home_path);
-        }
-    }
-}
-
-// Function to manage X11 authentication
+// Function to manage X11 authentication and generate an X cookie
 void manage_xauth(const std::string& cookie_path) {
-    // Ensure the home directory exists before creating the .Xauthority file
-    std::string dir_path = cookie_path.substr(0, cookie_path.find_last_of("/"));
-    ensure_home_directory(dir_path); // Ensure the home directory exists
-
     // Open X display for authentication
     Display* display = XOpenDisplay(nullptr);
     if (!display) {
@@ -106,37 +107,47 @@ void manage_xauth(const std::string& cookie_path) {
 
     // Get the display number
     int display_num = DefaultScreen(display);
-    std::string display_name = ":0"; // Modify as needed
+    std::string display_name = ":0";  // Modify as needed
 
-    // Generate a random X cookie
+    // Generate a random X cookie using OpenSSL
     unsigned char cookie[16];
     if (RAND_bytes(cookie, sizeof(cookie)) != 1) {
         throw std::runtime_error("Failed to generate X cookie");
     }
 
-    // Create and configure XAuth
-    Xauth* auth = XAllocAuth();
+    // Allocate Xauth manually
+    Xauth* auth = (Xauth*)malloc(sizeof(Xauth));
     if (!auth) {
         throw std::runtime_error("Failed to allocate XAuth structure");
     }
 
+    // Set authentication properties
     auth->family = FamilyLocal;  // Set the family (e.g., Local)
-    auth->number = display_num;   // Set display number (typically 0)
-    auth->name_length = display_name.length();  // Length of display name
-    auth->name = reinterpret_cast<unsigned char*>(const_cast<char*>(display_name.c_str()));  // Display name
-    auth->data_length = sizeof(cookie);  // Length of cookie
-    auth->data = cookie;  // The cookie itself
+
+    // Convert display number to string
+    std::string display_number_str = std::to_string(display_num);
+    auth->number = strdup(display_number_str.c_str());  // Set display number as string
+
+    auth->name_length = display_name.length();  // Set display name length
+    auth->name = strdup(display_name.c_str());  // Set display name
+
+    auth->data_length = sizeof(cookie);  // Set cookie length
+    auth->data = reinterpret_cast<char*>(cookie);  // Set cookie data
 
     // Write the cookie to the Xauthority file
     FILE* xauth_file = fopen(cookie_path.c_str(), "a");
     if (xauth_file) {
-        XauWriteAuth(xauth_file, auth); // Write the cookie to the file
+        XauWriteAuth(xauth_file, auth);  // Write the Xauth data to the file
         fclose(xauth_file);
     } else {
         throw std::runtime_error("Failed to open X authority file");
     }
 
-    XFree(auth);
+    // Free allocated memory
+    if (auth->number) free(auth->number);
+    if (auth->name) free(auth->name);
+    free(auth);
+
     XCloseDisplay(display);
 }
 
@@ -145,39 +156,43 @@ bool command_exists(const std::string& cmd) {
     return system(("command -v " + cmd + " > /dev/null 2>&1").c_str()) == 0;
 }
 
-// Main function
+// Main function to manage user authentication and command execution
 int main(int argc, char* argv[]) {
-    // Check if the program is executed in the correct environment
+    // Check if the program is executed with enough arguments
     if (argc < 2) {
         std::cerr << "[))> No program found to run!" << std::endl;
         return EXIT_FAILURE;
     }
 
-    std::string home_path = std::string(getenv("HOME")); // Get home directory
-    ensure_home_directory(home_path); // Ensure home directory exists
-
     std::string program = argv[1];
+    std::string username = getenv("USER");
 
-    // Check if the required commands exist
+    // Check if required command 'xauth' exists
     if (!command_exists("xauth")) {
         std::cerr << "[))> Missing dependency: xauth" << std::endl;
         return EXIT_FAILURE;
     }
 
-    // Read password securely
+    // Securely read the password from the user
     std::string password = read_password();
 
+    // Validate the password using the shadow file
+    if (!validate_password(username, password)) {
+        std::cerr << "[))> Error: Incorrect password." << std::endl;
+        return EXIT_FAILURE;
+    }
+
     // Manage X11 authentication
-    std::string cookie_path = home_path + "/.Xauthority"; // Path to Xauthority file
+    std::string cookie_path = std::string(getenv("HOME")) + "/.Xauthority";
     manage_xauth(cookie_path);
 
-    // Prepare command to run with user privileges
-    std::vector<std::string> command = {program}; // Prepare command with parameters if necessary
+    // Prepare the command with user-provided parameters (if any)
+    std::vector<std::string> command = { program };
     for (int i = 2; i < argc; ++i) {
         command.push_back(argv[i]);
     }
 
-    // Execute the command
+    // Execute the command securely
     try {
         execute_command(command);
         std::cout << "[))> Execution finished with no errors!" << std::endl;
