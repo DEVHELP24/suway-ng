@@ -5,8 +5,8 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <cstring>
-#include <fstream>
 #include <sstream>
+#include <termios.h>
 
 // Function to execute system commands and capture output
 std::string execCommand(const std::string &cmd) {
@@ -20,7 +20,7 @@ std::string execCommand(const std::string &cmd) {
     return result;
 }
 
-// Function to create and configure X authentication
+// Function to create and configure X authentication (without elevated permissions)
 void createXauth(const std::string &myxcookie) {
     std::string display = getenv("DISPLAY") ? getenv("DISPLAY") : ":0";
     std::string hostname = execCommand("uname -n");
@@ -32,11 +32,7 @@ void createXauth(const std::string &myxcookie) {
     system(cmd1.c_str());
     system(cmd2.c_str());
 
-    // Add read permissions to the cookie
-    std::string cmdAcl = "setfacl -m u:" + std::string(getenv("USER")) + ":r " + myxcookie;
-    system(cmdAcl.c_str());
-
-    std::cout << "[))> Xauth created and cookie extracted!" << std::endl;
+    std::cout << "[))> Xauth created and cookie extracted for X11!" << std::endl;
 }
 
 // Function to run commands with the Xauth cookie set
@@ -65,6 +61,41 @@ std::string findWaylandDisplay() {
     return "";
 }
 
+// Function to read password securely, showing asterisks for each character
+std::string readPassword() {
+    std::string password;
+    char ch;
+    
+    std::cout << "[))> Enter password: ";
+    termios oldt, newt;
+    tcgetattr(STDIN_FILENO, &oldt);
+    newt = oldt;
+    newt.c_lflag &= ~(ECHO);  // Disable echo
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
+
+    while ((ch = getchar()) != '\n' && ch != EOF) {
+        if (ch == 127 || ch == '\b') {  // Handle backspace
+            if (password.length() > 0) {
+                password.pop_back();
+                std::cout << "\b \b";  // Move back, overwrite with space, and move back again
+            }
+        } else {
+            password += ch;
+            std::cout << '*';  // Show an asterisk
+        }
+    }
+
+    std::cout << std::endl;
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);  // Restore old terminal settings
+    return password;
+}
+
+// Function to run commands with sudo
+void runWithSudo(const std::string &command) {
+    std::string sudoCmd = "sudo " + command;
+    system(sudoCmd.c_str());
+}
+
 // Main program logic
 int main(int argc, char *argv[]) {
     if (argc < 2) {
@@ -86,26 +117,16 @@ int main(int argc, char *argv[]) {
         std::cout << "[))> Wayland display set to: " << waylandDisplay << std::endl;
     } else {
         std::cout << "[))> No Wayland display found. Falling back to X11." << std::endl;
+        createXauth(myxcookie);  // Create X11 Xauth cookie
+        runWithXauth(myxcookie, program);  // Run with Xauth for X11
     }
 
-    // Check if sudo is available
-    std::string sudoCheck = execCommand("which sudo");
-    if (sudoCheck.empty()) {
-        std::cout << "[))> No sudo installed. Using xhost method." << std::endl;
-        createXauth(myxcookie);
-        runWithXauth(myxcookie, program);
-    } else {
-        // Run the program with sudo environment variables
-        std::string sudoCommand = "sudo -E " + program;
-        int result = system(sudoCommand.c_str());
-        if (result != 0) {
-            std::cout << "[))> Program failed with sudo. Falling back to xhost method." << std::endl;
-            createXauth(myxcookie);
-            runWithXauth(myxcookie, program);
-        }
-    }
+    // Prompt for password and run the program with sudo for root privileges
+    std::string password = readPassword();
+    std::string command = program;  // The command to run with sudo
+    runWithSudo(command);  // Run the program with sudo
 
-    // Clean up sensitive data
+    // Clear sensitive data
     std::cout << "[))> Program execution finished." << std::endl;
     return 0;
 }
