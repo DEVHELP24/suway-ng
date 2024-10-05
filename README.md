@@ -8,3 +8,8 @@ this tool is on the early phase... and the first Beta version ( v0.95)
 
 
 g++ suway-ng.cpp -o suway-ng -lX11 -lXau -lcrypto
+
+
+deps
+
+sudo pacman -Syu xorg-x11 xorg-xauth openssl
