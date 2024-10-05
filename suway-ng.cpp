@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Maintainer: NAZY-OS
-// This program prompts the user for a password and checks it against the stored hash in /etc/shadow.
-// It utilizes secure password input and X11 authentication to manage access control.
+// Description: This program securely executes a specified command with user authentication. 
+// It checks the user's password against the hashed password in /etc/shadow 
+// and manages X11 authentication without using sudo. The code is designed for security and simplicity.
 
 #include <iostream>
 #include <cstdlib>
@@ -9,42 +10,39 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <signal.h>
-#include <fcntl.h>
-#include <stdexcept>
+#include <pwd.h>
+#include <shadow.h>
 #include <string>
 #include <vector>
 #include <termios.h>
-#include <sys/stat.h>
+#include <fstream>
+#include <openssl/rand.h>
 #include <X11/Xlib.h>
 #include <X11/Xauth.h>
-#include <fstream>
-#include <openssl/rand.h> // Include for RAND_bytes
-#include <crypt.h> // Include for crypt() function
+#include <stdexcept>
 
-// Function to read password securely with asterisks for each character entered
+// Function to read the user's password securely, masking input with asterisks
 std::string read_password() {
     struct termios oldt, newt;
     std::string password;
 
-    // Get the current terminal settings
+    // Save current terminal settings
     tcgetattr(STDIN_FILENO, &oldt);
     newt = oldt;
     newt.c_lflag &= ~(ECHO); // Disable echoing
     tcsetattr(STDIN_FILENO, TCSANOW, &newt); // Apply new settings
 
     std::cout << "[))> Enter passphrase: ";
-
     char ch;
     while (std::cin.get(ch) && ch != '\n') {
-        if (ch == 127) { // Backspace
+        if (ch == 127) { // Backspace handling
             if (!password.empty()) {
                 password.pop_back();
                 std::cout << "\b \b"; // Remove the last asterisk
             }
         } else {
             password += ch;
-            std::cout << '*'; // Show asterisk for each character
+            std::cout << '*'; // Display an asterisk for each character
         }
     }
     std::cout << std::endl;
@@ -54,46 +52,16 @@ std::string read_password() {
     return password;
 }
 
-// Function to check the provided password against the user's hashed password
-bool check_password(const std::string& input_password) {
-    // Get the username of the current user
-    const char* username = getenv("USER");
-    if (!username) {
-        std::cerr << "[))> Error: Unable to get the username." << std::endl;
+// Function to verify the provided password against the stored hashed password
+bool check_password(const std::string& entered_password, const std::string& username) {
+    struct spwd* shadow_entry = getspnam(username.c_str());
+    if (!shadow_entry) {
+        std::cerr << "[))> User not found in shadow file." << std::endl;
         return false;
     }
 
-    // Open the shadow file
-    std::ifstream shadow_file("/etc/shadow");
-    if (!shadow_file.is_open()) {
-        std::cerr << "[))> Error: Unable to open /etc/shadow." << std::endl;
-        return false;
-    }
-
-    std::string line;
-    std::string hashed_password;
-
-    // Read through the shadow file to find the current user's entry
-    while (std::getline(shadow_file, line)) {
-        if (line.substr(0, line.find(':')) == username) {
-            // The hashed password is the second field in the line
-            hashed_password = line.substr(line.find(':') + 1, line.find(':', line.find(':') + 1) - line.find(':') - 1);
-            break;
-        }
-    }
-
-    shadow_file.close();
-
-    if (hashed_password.empty()) {
-        std::cerr << "[))> Error: No entry found for user " << username << "." << std::endl;
-        return false;
-    }
-
-    // Hash the input password and compare it to the stored hashed password
-    char* hashed_input = crypt(input_password.c_str(), hashed_password.c_str());
-
-    // Check if the stored hash matches the hashed input
-    return (hashed_input && strcmp(hashed_input, hashed_password.c_str()) == 0); // Compare the strings
+    // Check if the entered password matches the stored hashed password
+    return (crypt(entered_password.c_str(), shadow_entry->sp_pwdp) == shadow_entry->sp_pwdp);
 }
 
 // Function to execute a command
@@ -175,13 +143,14 @@ bool command_exists(const std::string& cmd) {
 
 // Main function
 int main(int argc, char* argv[]) {
-    // Check if the program is executed with a command to run
+    // Check if the program is executed with the required parameters
     if (argc < 2) {
         std::cerr << "[))> No program found to run!" << std::endl;
         return EXIT_FAILURE;
     }
 
     std::string program = argv[1];
+    std::string username = getlogin(); // Get the current username
 
     // Check if the required commands exist
     if (!command_exists("xauth")) {
@@ -192,9 +161,9 @@ int main(int argc, char* argv[]) {
     // Read password securely
     std::string password = read_password();
 
-    // Check the password against the user's hashed password in /etc/shadow
-    if (!check_password(password)) {
-        std::cerr << "[))> Error: Incorrect password." << std::endl;
+    // Verify user password
+    if (!check_password(password, username)) {
+        std::cerr << "[))> Incorrect password." << std::endl;
         return EXIT_FAILURE;
     }
 
@@ -202,8 +171,12 @@ int main(int argc, char* argv[]) {
     std::string cookie_path = std::string(getenv("HOME")) + "/.Xauthority";
     manage_xauth(cookie_path);
 
-    // Prepare command to run without sudo
+    // Prepare command to run with user privileges
     std::vector<std::string> command = {program};
+    // Append any additional parameters provided by the user
+    for (int i = 2; i < argc; ++i) {
+        command.push_back(argv[i]);
+    }
 
     // Execute the command
     try {
