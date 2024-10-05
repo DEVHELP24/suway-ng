@@ -100,7 +100,7 @@ void manage_xauth(const std::string& cookie_path) {
     }
 
     // Create and configure XAuth
-    Xauth* auth = XAllocAuth();
+    Xauth* auth = XauCreateAuth();
     if (!auth) {
         throw std::runtime_error("Failed to allocate XAuth structure");
     }
