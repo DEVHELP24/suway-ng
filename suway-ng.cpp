@@ -10,29 +10,33 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <signal.h>
+#include <fcntl.h>
 #include <stdexcept>
 #include <string>
 #include <vector>
 #include <termios.h>
-#include <pwd.h>
-#include <crypt.h>
+#include <sys/stat.h>
 #include <X11/Xlib.h>
 #include <X11/Xauth.h>
+#include <fstream>
+#include <crypt.h>
+#include <pwd.h>
 #include <wayland-client.h>
 
-constexpr size_t MAX_PASSWORD_LENGTH = 128;
-
-// Function to read password securely
+// Function to read password securely with asterisks for each character entered
 std::string read_password() {
     struct termios oldt, newt;
     std::string password;
 
+    // Get the current terminal settings
     tcgetattr(STDIN_FILENO, &oldt);
     newt = oldt;
     newt.c_lflag &= ~(ECHO); // Disable echoing
     tcsetattr(STDIN_FILENO, TCSANOW, &newt); // Apply new settings
 
     std::cout << "[))> Enter passphrase: ";
+
     char ch;
     while (std::cin.get(ch) && ch != '\n') {
         if (ch == 127) { // Backspace
@@ -40,24 +44,27 @@ std::string read_password() {
                 password.pop_back();
                 std::cout << "\b \b"; // Remove the last asterisk
             }
-        } else if (password.length() < MAX_PASSWORD_LENGTH) { // Prevent overflow
+        } else {
             password += ch;
             std::cout << '*'; // Show asterisk for each character
         }
     }
     std::cout << std::endl;
-    tcsetattr(STDIN_FILENO, TCSANOW, &oldt); // Restore old settings
+
+    // Restore old terminal settings
+    tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
     return password;
 }
 
-// Function to validate the provided password
+// Function to validate the provided password against the user's hashed password
 bool validate_password(const std::string& username, const std::string& password) {
     struct passwd* pwd = getpwnam(username.c_str());
-    if (!pwd) {
+    if (pwd == nullptr) {
         std::cerr << "[))> User not found: " << username << std::endl;
         return false;
     }
 
+    // Hash the input password with the stored salt and compare
     std::string hashed_input = crypt(password.c_str(), pwd->pw_passwd);
     return (hashed_input == pwd->pw_passwd);
 }
@@ -67,15 +74,18 @@ void execute_command(const std::vector<std::string>& cmd) {
     pid_t pid = fork();
     if (pid == 0) {
         // In child process, execute the command
-        std::vector<char*> argv(cmd.size() + 1);
-        for (size_t i = 0; i < cmd.size(); ++i) {
-            argv[i] = const_cast<char*>(cmd[i].c_str());
+        std::vector<char*> argv;
+        for (const auto& arg : cmd) {
+            argv.push_back(const_cast<char*>(arg.c_str()));
         }
-        argv[cmd.size()] = nullptr; // Last argument must be nullptr
+        argv.push_back(nullptr); // Last argument must be nullptr
         execvp(argv[0], argv.data());
-        perror("execvp failed");
+        
+        // If execvp fails
+        perror(("execvp failed for command: " + argv[0]).c_str());
         exit(EXIT_FAILURE);
     } else if (pid < 0) {
+        // Fork failed
         perror("fork failed");
         exit(EXIT_FAILURE);
     } else {
@@ -89,28 +99,38 @@ void execute_command(const std::vector<std::string>& cmd) {
 }
 
 // Function to manage X11 authentication
-void manage_xauth(const std::string& cookie_path) {
+void manage_xauth(const std::string& cookie_path, const std::string& display_name) {
     Display* display = XOpenDisplay(nullptr);
     if (!display) {
         throw std::runtime_error("Unable to open X display");
     }
 
     int display_num = DefaultScreen(display);
-    std::string display_name = ":0"; // Modify as needed
-    Xauth* auth = XauGetAuthByAddr(0, display_name.c_str(), display_num, display_name.c_str());
-
+    
+    // Use XauGetBestAuthByAddr for better retrieval of Xauth entry
+    Xauth* auth = XauGetBestAuthByAddr(display_name.c_str(), display_num, nullptr, 0);
     if (!auth) {
+        XCloseDisplay(display);
         throw std::runtime_error("Failed to get Xauth entry");
     }
 
-    FILE* xauth_file = fopen(cookie_path.c_str(), "a");
-    if (xauth_file) {
-        XauWriteAuth(xauth_file, auth);
-        fclose(xauth_file);
-    } else {
+    // Open the .Xauthority file in binary append mode
+    FILE* xauth_file = fopen(cookie_path.c_str(), "ab");
+    if (!xauth_file) {
+        XFree(auth);
+        XCloseDisplay(display);
         throw std::runtime_error("Failed to open X authority file");
     }
 
+    // Write the authentication data to the file and check for errors
+    if (XauWriteAuth(xauth_file, auth) < 0) {
+        fclose(xauth_file);
+        XFree(auth);
+        XCloseDisplay(display);
+        throw std::runtime_error("Failed to write to X authority file");
+    }
+
+    fclose(xauth_file);
     XFree(auth);
     XCloseDisplay(display);
 }
@@ -122,7 +142,12 @@ void connect_to_wayland() {
         throw std::runtime_error("Failed to connect to Wayland display");
     }
     std::cout << "[))> Successfully connected to Wayland!" << std::endl;
-    wl_display_disconnect(display); // Clean up
+
+    // Placeholder for future Wayland functionalities
+    // Here you can add code to create a Wayland surface or other objects
+
+    // Clean up
+    wl_display_disconnect(display);
 }
 
 // Function to check if a command exists in the PATH
@@ -132,42 +157,60 @@ bool command_exists(const std::string& cmd) {
 
 // Main function
 int main(int argc, char* argv[]) {
+    // Check if the program is executed in the correct environment
     if (argc < 2) {
         std::cerr << "[))> No program found to run!" << std::endl;
         return EXIT_FAILURE;
     }
 
     std::string program = argv[1];
+
+    // Get current username
     char* username_env = getenv("USER");
-    if (!username_env) {
+    if (username_env == nullptr) {
         std::cerr << "[))> USER environment variable not set." << std::endl;
         return EXIT_FAILURE;
     }
     std::string username = username_env;
 
+    // Check if the required commands exist
     if (!command_exists("xauth")) {
         std::cerr << "[))> Missing dependency: xauth" << std::endl;
         return EXIT_FAILURE;
     }
 
+    // Read password securely
     std::string password = read_password();
 
+    // Validate user password
     if (!validate_password(username, password)) {
         std::cerr << "[))> Invalid password!" << std::endl;
         return EXIT_FAILURE;
     }
 
+    // Manage X11 authentication
     std::string cookie_path = std::string(getenv("HOME")) + "/.Xauthority";
+    std::string display_name = ":0"; // You may adjust this if needed
+
     try {
-        manage_xauth(cookie_path);
+        manage_xauth(cookie_path, display_name);
+    } catch (const std::runtime_error& e) {
+        std::cerr << "[))> Error: " << e.what() << std::endl;
+        return EXIT_FAILURE;
+    }
+
+    // Connect to Wayland
+    try {
         connect_to_wayland();
     } catch (const std::runtime_error& e) {
         std::cerr << "[))> Error: " << e.what() << std::endl;
         return EXIT_FAILURE;
     }
 
+    // Prepare command to run
     std::vector<std::string> command = {program};
 
+    // Execute the command
     try {
         execute_command(command);
         std::cout << "[))> Execution finished with no errors!" << std::endl;
