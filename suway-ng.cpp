@@ -1,122 +1,154 @@
 #include <iostream>
-#include <vector>
+#include <fstream>
+#include <sstream>
 #include <string>
-#include <cstdlib>
-#include <cstdio>
-#include <cstring>
+#include <vector>
 #include <unistd.h>
-#include <signal.h>
 #include <sys/types.h>
-#include <sys/stat.h>
-#include <fcntl.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <pwd.h>
+#include <fcntl.h>
+#include <cstring>
+#include <sys/stat.h>
 
-#define COMMAND_LENGTH 256
-
-// SPDX-License-Identifier: MIT
-// Maintainer: [NAZY-OS]
-// This program kills all processes that match the given program names.
-// Usage: suway-ng <program-name>
-
-std::string getPID(const std::string& program) {
-    std::string command = "ps -ef | grep -E 'suway " + program + "' | grep -v grep | awk '{print $2}'";
-    FILE* pipe = popen(command.c_str(), "r");
-    if (!pipe) return "";
-    
-    char buffer[COMMAND_LENGTH];
-    std::string result;
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-        result += buffer;
-    }
-    pclose(pipe);
-    return result;
+// Function to handle and display errors
+void handleError(const std::string &message) {
+    std::cerr << "[))> Error: " << message << std::endl;
+    exit(EXIT_FAILURE);
 }
 
-void handleSignal(int signal) {
-    std::cout << "\nsuway closed!!" << std::endl;
-    exit(0);
-}
-
-void runCommand(const std::string& cmd) {
-    system(cmd.c_str());
-}
-
-std::string readPassword() {
-    std::string password;
-    char ch;
-    std::cout << "[))> Enter passphrase: ";
-    while ((ch = getchar()) != '\n') {
-        if (ch == 127) { // Handle backspace
-            if (!password.empty()) {
-                password.pop_back();
-                std::cout << "\b \b"; // Erase character
-            }
-        } else {
-            password += ch;
-            std::cout << '*'; // Mask input
+// Function to check if the program name contains only valid characters
+bool isValidProgramName(const std::string& name) {
+    for (char c : name) {
+        if (!isalnum(c) && c != '-' && c != '_' && c != '.') {
+            return false;
         }
     }
-    std::cout << std::endl;
-    return password;
-}
-
-bool xauthCreate(const std::string& myxcookie) {
-    std::string command = "xauth add \"$(uname -n)\" . \"$(xxd -l 16 -p /dev/urandom)\"";
-    runCommand(command);
-    command = "xauth extract " + myxcookie + " \"$(uname -n)\"";
-    runCommand(command);
-    command = "setfacl -m u:" + std::string(getpwuid(getuid())->pw_name) + ":r " + myxcookie;
-    runCommand(command);
     return true;
 }
 
-bool runWithSudo(const std::string& command) {
-    std::string fullCommand = "sudo -E " + command;
-    return system(fullCommand.c_str()) == 0;
+// Function to get the current user's home directory
+std::string getUserHomeDirectory() {
+    const char *homeDir = getenv("HOME");
+    if (!homeDir) {
+        struct passwd *pw = getpwuid(getuid());
+        homeDir = pw->pw_dir;
+    }
+    return std::string(homeDir);
 }
 
-bool runWithXauth(const std::string& command, const std::string& myxcookie) {
-    if (!xauthCreate(myxcookie)) return false;
-    return runWithSudo(command);
+// Function to securely capture the password
+void securePasswordInput(std::string &password) {
+    password.clear();
+    char ch;
+    std::cout << "[))> Enter passphrase: ";
+    while ((ch = getchar()) != '\n' && ch != EOF) {
+        password.push_back(ch);
+        std::cout << "*";
+    }
+    std::cout << std::endl;
 }
 
-bool checkDependencies() {
-    return system("which xauth &> /dev/null") == 0;
+// Function to kill processes by their PID
+void killProcesses(const std::string &processName) {
+    std::string command = "pgrep " + processName;
+    FILE *pipe = popen(command.c_str(), "r");
+    if (!pipe) {
+        handleError("Failed to execute pgrep command.");
+    }
+
+    char buffer[128];
+    std::vector<pid_t> pids;
+    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+        pid_t pid = std::stoi(buffer);
+        pids.push_back(pid);
+    }
+    pclose(pipe);
+
+    uid_t currentUser = getuid();
+    for (pid_t pid : pids) {
+        struct stat processStat;
+        std::string statPath = "/proc/" + std::to_string(pid);
+        if (stat(statPath.c_str(), &processStat) == 0 && processStat.st_uid == currentUser) {
+            if (kill(pid, SIGKILL) == 0) {
+                std::cout << "[))> Process " << pid << " killed successfully." << std::endl;
+            } else {
+                std::cerr << "[))> Failed to kill process with PID " << pid << std::endl;
+            }
+        } else {
+            std::cerr << "[))> Skipping process " << pid << " (not owned by current user)." << std::endl;
+        }
+    }
 }
 
-int main(int argc, char* argv[]) {
+// Function to run a command with sudo
+void runWithSudo(const std::string &command) {
+    std::string password;
+    securePasswordInput(password);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        handleError("Fork failed.");
+    } else if (pid == 0) {
+        // Child process to execute the command
+        char *args[] = { (char *)"/bin/bash", (char *)"-c", (char *)command.c_str(), nullptr };
+        execvp(args[0], args);
+        handleError("Failed to execute command.");
+    } else {
+        // Parent process waits for child
+        int status;
+        waitpid(pid, &status, 0);
+        if (WIFEXITED(status)) {
+            std::cout << "[))> Command executed successfully." << std::endl;
+        } else {
+            handleError("Command failed.");
+        }
+    }
+
+    // Clear sensitive password data after use
+    std::fill(password.begin(), password.end(), '\0');
+}
+
+// Signal handler to clean up on interrupt (Ctrl+C)
+void handleSignal(int signal) {
+    std::cout << "\n[))> suway-ng interrupted!" << std::endl;
+    // Clear sensitive data
+    unsetenv("PASSWORD");
+    exit(EXIT_FAILURE);
+}
+
+int main(int argc, char *argv[]) {
+    // Register signal handlers for clean exit on Ctrl+C or termination
     signal(SIGINT, handleSignal);
+    signal(SIGTERM, handleSignal);
 
     if (argc < 2) {
-        std::cerr << "[))> No program found to run with suway!" << std::endl;
-        return 1;
+        handleError("No program found to run with suway!");
     }
 
-    std::string mainProgram = argv[1];
-    std::string myxcookie = std::string(getpwuid(getuid())->pw_dir) + "/my-x-cookie";
+    std::string programName = argv[1];
 
-    // Check for dependencies
-    if (!checkDependencies()) {
-        std::cerr << "To use suway, please install xorg-xauth!" << std::endl;
-        return 1;
+    // Validate the program name input
+    if (!isValidProgramName(programName)) {
+        handleError("Invalid characters in program name.");
     }
 
-    // Get the PID of the process
-    std::string pid = getPID(mainProgram);
-    std::cout << "suway PID: " << pid << std::endl;
-
-    // Read the password
-    std::string password = readPassword();
-
-    // Attempt to run the program with xauth
-    if (runWithXauth(mainProgram, myxcookie)) {
-        std::cout << "[))> suway execution finished with no errors!" << std::endl;
-    } else {
-        std::cerr << "[))> suway execution encountered an issue!" << std::endl;
-        return 1;
+    // Check if the program exists in the system using access()
+    if (access(("/usr/bin/" + programName).c_str(), X_OK) != 0) {
+        handleError("Command " + programName + " not found!");
     }
 
-    // Clear sensitive variables
-    password.clear();
+    std::cout << "suway-ng for program: " << programName << std::endl;
+
+    // Kill processes matching the given program name
+    killProcesses(programName);
+
+    // Run the program with sudo privileges
+    runWithSudo(programName);
+
+    // Clear environment variables holding sensitive data
+    unsetenv("PASSWORD");
+
     return 0;
 }
