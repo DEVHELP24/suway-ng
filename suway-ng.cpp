@@ -100,17 +100,17 @@ void manage_xauth(const std::string& cookie_path) {
     }
 
     // Create and configure XAuth
-    Xauth* auth = XauCreateAuth();
+    Xauth* auth = XAllocAuth();
     if (!auth) {
         throw std::runtime_error("Failed to allocate XAuth structure");
     }
 
-    auth->family = FamilyLocal;
-    auth->number = display_num;
-    auth->name_length = display_name.length();
-    auth->name = reinterpret_cast<unsigned char*>(const_cast<char*>(display_name.c_str()));
-    auth->data_length = sizeof(cookie);
-    auth->data = cookie;
+    auth->family = FamilyLocal;  // Set the family (e.g., Local)
+    auth->number = display_num;   // Set display number (typically 0)
+    auth->name_length = display_name.length();  // Length of display name
+    auth->name = reinterpret_cast<unsigned char*>(const_cast<char*>(display_name.c_str()));  // Display name
+    auth->data_length = sizeof(cookie);  // Length of cookie
+    auth->data = cookie;  // The cookie itself
 
     // Write the cookie to the Xauthority file
     FILE* xauth_file = fopen(cookie_path.c_str(), "a");
