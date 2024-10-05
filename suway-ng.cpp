@@ -19,20 +19,21 @@
 #include <X11/Xauth.h>
 #include <X11/Xlib.h>
 #include <fstream>
+#include <openssl/rand.h> // Include for RAND_bytes
 
 // Function to read password securely with asterisks for each character entered
 std::string read_password() {
     struct termios oldt, newt;
     std::string password;
-    
+
     // Get the current terminal settings
     tcgetattr(STDIN_FILENO, &oldt);
     newt = oldt;
     newt.c_lflag &= ~(ECHO); // Disable echoing
     tcsetattr(STDIN_FILENO, TCSANOW, &newt); // Apply new settings
-    
+
     std::cout << "[))> Enter passphrase: ";
-    
+
     char ch;
     while (std::cin.get(ch) && ch != '\n') {
         if (ch == 127) { // Backspace
@@ -46,7 +47,7 @@ std::string read_password() {
         }
     }
     std::cout << std::endl;
-    
+
     // Restore old terminal settings
     tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
     return password;
@@ -98,15 +99,20 @@ void manage_xauth(const std::string& cookie_path) {
         throw std::runtime_error("Failed to generate X cookie");
     }
 
-    // Write the cookie to the Xauthority file
+    // Create and configure XAuth
     XAuth* auth = XAllocAuth();
+    if (!auth) {
+        throw std::runtime_error("Failed to allocate XAuth structure");
+    }
+
     auth->family = FamilyLocal;
     auth->number = display_num;
-    auth->name_length = strlen(display_name.c_str());
+    auth->name_length = display_name.length();
     auth->name = reinterpret_cast<BYTE*>(const_cast<char*>(display_name.c_str()));
     auth->data_length = sizeof(cookie);
     auth->data = cookie;
 
+    // Write the cookie to the Xauthority file
     FILE* xauth_file = fopen(cookie_path.c_str(), "a");
     if (xauth_file) {
         XauFileName = cookie_path.c_str(); // Set the authority file name
@@ -150,7 +156,7 @@ int main(int argc, char* argv[]) {
 
     // Prepare command to run with root privileges
     std::vector<std::string> command = {"sudo", program};
-    
+
     // Execute the command
     try {
         execute_command(command);
