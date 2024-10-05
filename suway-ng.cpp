@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Maintainer: NAZY-OS
-// This program runs a specified command with root privileges after validating the user password 
-// against the hashed password stored in the /etc/shadow file. 
-// It supports both X11 and Wayland, utilizing X11 authentication when necessary.
+// This program runs a specified command with user privileges after prompting for a password.
+// It utilizes X11 authentication and handles user input securely, including support for Wayland.
 
 #include <iostream>
 #include <cstdlib>
@@ -10,22 +9,21 @@
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/stat.h>
 #include <signal.h>
 #include <fcntl.h>
 #include <stdexcept>
 #include <string>
 #include <vector>
 #include <termios.h>
-#include <sys/stat.h>
-#include <fstream>
-#include <crypt.h> // Include for password hashing comparison
 #include <X11/Xlib.h>
 #include <X11/Xauth.h>
-#include <openssl/rand.h> // Include for RAND_bytes
+#include <fstream>
+#include <openssl/rand.h>
 
 // Function to read password securely with asterisks for each character entered
 std::string read_password() {
-    struct termios oldt, newt; // Struct to manage terminal settings
+    struct termios oldt, newt;
     std::string password;
 
     // Get the current terminal settings
@@ -38,7 +36,7 @@ std::string read_password() {
 
     char ch;
     while (std::cin.get(ch) && ch != '\n') {
-        if (ch == 127) { // Backspace handling
+        if (ch == 127) { // Backspace
             if (!password.empty()) {
                 password.pop_back();
                 std::cout << "\b \b"; // Remove the last asterisk
@@ -57,7 +55,7 @@ std::string read_password() {
 
 // Function to execute a command
 void execute_command(const std::vector<std::string>& cmd) {
-    pid_t pid = fork(); // Create a new process
+    pid_t pid = fork();
     if (pid == 0) {
         // In child process, execute the command
         std::vector<char*> argv;
@@ -83,9 +81,24 @@ void execute_command(const std::vector<std::string>& cmd) {
     }
 }
 
+// Function to ensure the home directory exists
+void ensure_home_directory(const std::string& home_path) {
+    struct stat st;
+    if (stat(home_path.c_str(), &st) != 0) {
+        // Directory does not exist; create it
+        if (mkdir(home_path.c_str(), 0700) != 0) {
+            throw std::runtime_error("Failed to create home directory: " + home_path);
+        }
+    }
+}
+
 // Function to manage X11 authentication
 void manage_xauth(const std::string& cookie_path) {
-    // Create or update .Xauthority
+    // Ensure the home directory exists before creating the .Xauthority file
+    std::string dir_path = cookie_path.substr(0, cookie_path.find_last_of("/"));
+    ensure_home_directory(dir_path); // Ensure the home directory exists
+
+    // Open X display for authentication
     Display* display = XOpenDisplay(nullptr);
     if (!display) {
         throw std::runtime_error("Unable to open X display");
@@ -96,7 +109,7 @@ void manage_xauth(const std::string& cookie_path) {
     std::string display_name = ":0"; // Modify as needed
 
     // Generate a random X cookie
-    unsigned char cookie[16]; // Correctly typed for the cookie
+    unsigned char cookie[16];
     if (RAND_bytes(cookie, sizeof(cookie)) != 1) {
         throw std::runtime_error("Failed to generate X cookie");
     }
@@ -132,44 +145,16 @@ bool command_exists(const std::string& cmd) {
     return system(("command -v " + cmd + " > /dev/null 2>&1").c_str()) == 0;
 }
 
-// Function to validate the user password against the shadow file
-bool validate_password(const std::string& username, const std::string& password) {
-    std::ifstream shadow_file("/etc/shadow");
-    if (!shadow_file.is_open()) {
-        throw std::runtime_error("Failed to open /etc/shadow");
-    }
-
-    std::string line;
-    while (std::getline(shadow_file, line)) {
-        if (line.empty() || line[0] == '#') continue; // Skip comments and empty lines
-
-        // Split the line into username and hashed password
-        size_t pos = line.find(':');
-        if (pos == std::string::npos) continue; // Skip malformed lines
-
-        std::string user = line.substr(0, pos);
-        std::string hashed_password = line.substr(pos + 1, line.find(':', pos + 1) - pos - 1);
-
-        // Check if username matches
-        if (user == username) {
-            // Hash the entered password and compare with the stored hash
-            const char* entered_hash = crypt(password.c_str(), hashed_password.c_str());
-            shadow_file.close();
-            return entered_hash && strcmp(entered_hash, hashed_password.c_str()) == 0;
-        }
-    }
-
-    shadow_file.close();
-    return false; // Username not found
-}
-
 // Main function
 int main(int argc, char* argv[]) {
-    // Check if the program is executed with the required arguments
+    // Check if the program is executed in the correct environment
     if (argc < 2) {
         std::cerr << "[))> No program found to run!" << std::endl;
         return EXIT_FAILURE;
     }
+
+    std::string home_path = std::string(getenv("HOME")); // Get home directory
+    ensure_home_directory(home_path); // Ensure home directory exists
 
     std::string program = argv[1];
 
@@ -179,26 +164,15 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    // Read username and password securely
-    std::string username;
-    std::cout << "[))> Enter your username: ";
-    std::cin >> username; // Simple input for username
+    // Read password securely
     std::string password = read_password();
 
-    // Validate the user password against the shadow file
-    if (!validate_password(username, password)) {
-        std::cerr << "[))> Authentication failed!" << std::endl;
-        return EXIT_FAILURE;
-    }
-
     // Manage X11 authentication
-    std::string cookie_path = std::string(getenv("HOME")) + "/.Xauthority";
+    std::string cookie_path = home_path + "/.Xauthority"; // Path to Xauthority file
     manage_xauth(cookie_path);
 
-    // Prepare command to run with root privileges
-    std::vector<std::string> command = {program};
-    
-    // Include user parameters if present
+    // Prepare command to run with user privileges
+    std::vector<std::string> command = {program}; // Prepare command with parameters if necessary
     for (int i = 2; i < argc; ++i) {
         command.push_back(argv[i]);
     }
