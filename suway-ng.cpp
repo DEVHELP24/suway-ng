@@ -24,7 +24,7 @@
 #include <pwd.h>
 #include <wayland-client.h>
 
-const int MAX_PASSWORD_LENGTH = 128; // Maximum password length
+constexpr size_t MAX_PASSWORD_LENGTH = 128; // Define a max password length
 
 // Function to read password securely with asterisks for each character entered
 std::string read_password() {
@@ -46,14 +46,9 @@ std::string read_password() {
                 password.pop_back();
                 std::cout << "\b \b"; // Remove the last asterisk
             }
-        } else {
-            if (password.length() < MAX_PASSWORD_LENGTH) { // Limit password length
-                password += ch;
-                std::cout << '*'; // Show asterisk for each character
-            } else {
-                std::cout << "\n[))> Password is too long, maximum length is " << MAX_PASSWORD_LENGTH << " characters." << std::endl;
-                break;
-            }
+        } else if (password.length() < MAX_PASSWORD_LENGTH) { // Prevent overflow
+            password += ch;
+            std::cout << '*'; // Show asterisk for each character
         }
     }
     std::cout << std::endl;
@@ -86,10 +81,11 @@ void execute_command(const std::vector<std::string>& cmd) {
             argv.push_back(const_cast<char*>(arg.c_str()));
         }
         argv.push_back(nullptr); // Last argument must be nullptr
-        execvp(argv[0], argv.data());
-        // If execvp fails
-        perror("execvp failed");
-        exit(EXIT_FAILURE);
+        if (execvp(argv[0], argv.data()) == -1) {
+            std::cerr << "[))> Execution failed for command: " << argv[0] << std::endl;
+            perror("execvp error");
+            exit(EXIT_FAILURE);
+        }
     } else if (pid < 0) {
         // Fork failed
         perror("fork failed");
@@ -118,6 +114,9 @@ void manage_xauth(const std::string& cookie_path) {
 
     // Create XAuth entry
     Xauth* auth = XauGetAuthByAddr(0, display_name.c_str(), display_num, display_name.c_str());
+    if (!auth) {
+        throw std::runtime_error("Failed to get Xauth entry");
+    }
 
     // Write the cookie to the Xauthority file
     FILE* xauth_file = fopen(cookie_path.c_str(), "a");
@@ -141,7 +140,6 @@ void connect_to_wayland() {
     std::cout << "[))> Successfully connected to Wayland!" << std::endl;
 
     // Placeholder for future Wayland functionalities
-    // Here you can add code to create a Wayland surface or other objects
 
     // Clean up
     wl_display_disconnect(display);
@@ -149,7 +147,8 @@ void connect_to_wayland() {
 
 // Function to check if a command exists in the PATH
 bool command_exists(const std::string& cmd) {
-    return system(("command -v " + cmd + " > /dev/null 2>&1").c_str()) == 0;
+    std::ifstream file(cmd);
+    return file.good();
 }
 
 // Main function
@@ -161,7 +160,12 @@ int main(int argc, char* argv[]) {
     }
 
     std::string program = argv[1];
-    std::string username = getenv("USER"); // Get current username
+    char* username_env = getenv("USER"); // Get current username
+    if (username_env == nullptr) {
+        std::cerr << "[))> USER environment variable not set." << std::endl;
+        return EXIT_FAILURE;
+    }
+    std::string username = username_env;
 
     // Check if the required commands exist
     if (!command_exists("xauth")) {
@@ -180,7 +184,12 @@ int main(int argc, char* argv[]) {
 
     // Manage X11 authentication
     std::string cookie_path = std::string(getenv("HOME")) + "/.Xauthority";
-    manage_xauth(cookie_path);
+    try {
+        manage_xauth(cookie_path);
+    } catch (const std::runtime_error& e) {
+        std::cerr << "[))> Error: " << e.what() << std::endl;
+        return EXIT_FAILURE;
+    }
 
     // Connect to Wayland
     try {
