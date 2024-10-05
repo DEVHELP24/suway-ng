@@ -1,22 +1,10 @@
 #include <iostream>
-#include <string>
 #include <cstdlib>
-#include <cstring>
+#include <string>
+#include <cstdio>
 #include <unistd.h>
-#include <limits.h>
+#include <sys/stat.h>
 
-#ifdef __unix__
-#include <xauth.h>
-#endif
-
-/*
- * This program is designed to be placed in the /sbin folder.
- * It executes commands directly without using sudo, so ensure 
- * that the necessary permissions are granted for the commands 
- * you intend to run.
- */
-
-// Function to securely read the password with asterisks
 std::string readPassword() {
     std::string password;
     char ch;
@@ -40,42 +28,47 @@ std::string readPassword() {
     return password;
 }
 
-// Function to create X11 authentication
 bool createXAuth() {
-    if (system("xauth add $(uname -n):0 . $(xxd -l 16 -p /dev/urandom)") != 0) {
-        std::cerr << "[!!] Failed to create X11 authentication." << std::endl;
+    const char* display = getenv("DISPLAY");
+    std::string command;
+
+    if (display) {
+        command = "xauth add " + std::string(display) + " . $(xxd -l 16 -p /dev/urandom)";
+        if (system(command.c_str()) == -1) {
+            std::cerr << "[!!] Failed to create X authority." << std::endl;
+            return false;
+        }
+    }
+    return true;
+}
+
+bool xhostAccess(const std::string& user) {
+    std::string command = "xhost +SI:localuser:" + user;
+    if (system(command.c_str()) == -1) {
+        std::cerr << "[!!] Failed to set xhost access." << std::endl;
         return false;
     }
     return true;
 }
 
-// Function to validate the command input
-bool isCommandValid(const std::string& command) {
-    // Check for disallowed characters to prevent command injection
-    return command.find(';') == std::string::npos && command.find('&') == std::string::npos;
+bool extractXCookie(const std::string& cookieFile) {
+    std::string command = "xauth extract " + cookieFile + " $DISPLAY";
+    return system(command.c_str()) == 0;
 }
 
-// Function to run the command
-bool runCommand(const std::string& command) {
-    // Run the command directly without sudo
+bool mergeXCookie(const std::string& cookieFile) {
+    std::string command = "xauth merge " + cookieFile;
     return system(command.c_str()) == 0;
 }
 
 int main(int argc, char* argv[]) {
+    // Check if a command was provided
     if (argc < 2) {
-        std::cerr << "[!!] No program found to run!" << std::endl;
+        std::cerr << "[!!] No command provided to run." << std::endl;
         return 1;
     }
 
-    std::string command = argv[1];
-
-    // Validate the command to prevent injection
-    if (!isCommandValid(command)) {
-        std::cerr << "[!!] Invalid command!" << std::endl;
-        return 1;
-    }
-
-    // Set up Wayland or X11 environment variables
+    // Get the display variables
     const char* display = getenv("DISPLAY");
     const char* wayland_display = getenv("WAYLAND_DISPLAY");
 
@@ -88,17 +81,40 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Read password securely
+    // Read password from the user
     std::string password = readPassword();
 
-    // Create X11 authentication (if using X11)
+    // Create X authentication if necessary
     if (display && !createXAuth()) {
         return 1;
     }
 
-    // Run the command without sudo
-    if (!runCommand(command)) {
-        std::cerr << "[!!] Failed to run the command." << std::endl;
+    // Grant access to the local user for X11
+    const char* user = getenv("USER");
+    if (user && !xhostAccess(user)) {
+        return 1;
+    }
+
+    // Extract X cookie
+    std::string cookieFile = "/tmp/xauth_cookie";
+    if (!extractXCookie(cookieFile)) {
+        std::cerr << "[!!] Failed to extract X cookie." << std::endl;
+        return 1;
+    }
+
+    // Merge the extracted cookie back
+    if (!mergeXCookie(cookieFile)) {
+        std::cerr << "[!!] Failed to merge X cookie." << std::endl;
+        return 1;
+    }
+
+    // Construct the command to run
+    std::string command = "echo " + password + " | " + argv[1];
+
+    // Execute the command
+    int result = system(command.c_str());
+    if (result == -1) {
+        std::cerr << "[!!] Command execution failed." << std::endl;
         return 1;
     }
 
