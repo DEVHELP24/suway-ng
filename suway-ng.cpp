@@ -1,154 +1,111 @@
 #include <iostream>
-#include <fstream>
-#include <sstream>
-#include <string>
-#include <vector>
+#include <cstdlib>
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <signal.h>
-#include <pwd.h>
 #include <fcntl.h>
 #include <cstring>
-#include <sys/stat.h>
+#include <fstream>
+#include <sstream>
 
-// Function to handle and display errors
-void handleError(const std::string &message) {
-    std::cerr << "[))> Error: " << message << std::endl;
-    exit(EXIT_FAILURE);
+// Function to execute system commands and capture output
+std::string execCommand(const std::string &cmd) {
+    std::array<char, 128> buffer;
+    std::string result;
+    std::shared_ptr<FILE> pipe(popen(cmd.c_str(), "r"), pclose);
+    if (!pipe) throw std::runtime_error("popen() failed!");
+    while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) {
+        result += buffer.data();
+    }
+    return result;
 }
 
-// Function to check if the program name contains only valid characters
-bool isValidProgramName(const std::string& name) {
-    for (char c : name) {
-        if (!isalnum(c) && c != '-' && c != '_' && c != '.') {
-            return false;
-        }
-    }
-    return true;
+// Function to create and configure X authentication
+void createXauth(const std::string &myxcookie) {
+    std::string display = getenv("DISPLAY") ? getenv("DISPLAY") : ":0";
+    std::string hostname = execCommand("uname -n");
+    hostname.erase(std::remove(hostname.begin(), hostname.end(), '\n'), hostname.end());
+
+    std::string cmd1 = "xauth add " + hostname + display + " . $(xxd -l 16 -p /dev/urandom)";
+    std::string cmd2 = "xauth extract " + myxcookie + " " + hostname + display;
+
+    system(cmd1.c_str());
+    system(cmd2.c_str());
+
+    // Add read permissions to the cookie
+    std::string cmdAcl = "setfacl -m u:" + std::string(getenv("USER")) + ":r " + myxcookie;
+    system(cmdAcl.c_str());
+
+    std::cout << "[))> Xauth created and cookie extracted!" << std::endl;
 }
 
-// Function to get the current user's home directory
-std::string getUserHomeDirectory() {
-    const char *homeDir = getenv("HOME");
-    if (!homeDir) {
-        struct passwd *pw = getpwuid(getuid());
-        homeDir = pw->pw_dir;
-    }
-    return std::string(homeDir);
+// Function to run commands with the Xauth cookie set
+void runWithXauth(const std::string &myxcookie, const std::string &command) {
+    setenv("DISPLAY", ":0", 1);  // Ensure DISPLAY is set to the correct value
+    std::string cmd = "xauth merge " + myxcookie + " && " + command;
+    system(cmd.c_str());
 }
 
-// Function to securely capture the password
-void securePasswordInput(std::string &password) {
-    password.clear();
-    char ch;
-    std::cout << "[))> Enter passphrase: ";
-    while ((ch = getchar()) != '\n' && ch != EOF) {
-        password.push_back(ch);
-        std::cout << "*";
+// Function to find Wayland display
+std::string findWaylandDisplay() {
+    const char* runtimeDir = getenv("XDG_RUNTIME_DIR");
+    if (!runtimeDir) {
+        std::cerr << "Error: XDG_RUNTIME_DIR is not set!" << std::endl;
+        exit(EXIT_FAILURE);
     }
-    std::cout << std::endl;
+
+    std::string findCommand = "find " + std::string(runtimeDir) + "/wayland-* | grep -v '.lock'";
+    std::string waylandDisplay = execCommand(findCommand);
+
+    if (!waylandDisplay.empty()) {
+        waylandDisplay.erase(std::remove(waylandDisplay.begin(), waylandDisplay.end(), '\n'), waylandDisplay.end());
+        return waylandDisplay;
+    }
+
+    return "";
 }
 
-// Function to kill processes by their PID
-void killProcesses(const std::string &processName) {
-    std::string command = "pgrep " + processName;
-    FILE *pipe = popen(command.c_str(), "r");
-    if (!pipe) {
-        handleError("Failed to execute pgrep command.");
-    }
-
-    char buffer[128];
-    std::vector<pid_t> pids;
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-        pid_t pid = std::stoi(buffer);
-        pids.push_back(pid);
-    }
-    pclose(pipe);
-
-    uid_t currentUser = getuid();
-    for (pid_t pid : pids) {
-        struct stat processStat;
-        std::string statPath = "/proc/" + std::to_string(pid);
-        if (stat(statPath.c_str(), &processStat) == 0 && processStat.st_uid == currentUser) {
-            if (kill(pid, SIGKILL) == 0) {
-                std::cout << "[))> Process " << pid << " killed successfully." << std::endl;
-            } else {
-                std::cerr << "[))> Failed to kill process with PID " << pid << std::endl;
-            }
-        } else {
-            std::cerr << "[))> Skipping process " << pid << " (not owned by current user)." << std::endl;
-        }
-    }
-}
-
-// Function to run a command with sudo
-void runWithSudo(const std::string &command) {
-    std::string password;
-    securePasswordInput(password);
-
-    pid_t pid = fork();
-    if (pid < 0) {
-        handleError("Fork failed.");
-    } else if (pid == 0) {
-        // Child process to execute the command
-        char *args[] = { (char *)"/bin/bash", (char *)"-c", (char *)command.c_str(), nullptr };
-        execvp(args[0], args);
-        handleError("Failed to execute command.");
-    } else {
-        // Parent process waits for child
-        int status;
-        waitpid(pid, &status, 0);
-        if (WIFEXITED(status)) {
-            std::cout << "[))> Command executed successfully." << std::endl;
-        } else {
-            handleError("Command failed.");
-        }
-    }
-
-    // Clear sensitive password data after use
-    std::fill(password.begin(), password.end(), '\0');
-}
-
-// Signal handler to clean up on interrupt (Ctrl+C)
-void handleSignal(int signal) {
-    std::cout << "\n[))> suway-ng interrupted!" << std::endl;
-    // Clear sensitive data
-    unsetenv("PASSWORD");
-    exit(EXIT_FAILURE);
-}
-
+// Main program logic
 int main(int argc, char *argv[]) {
-    // Register signal handlers for clean exit on Ctrl+C or termination
-    signal(SIGINT, handleSignal);
-    signal(SIGTERM, handleSignal);
-
     if (argc < 2) {
-        handleError("No program found to run with suway!");
+        std::cerr << "[))> No program specified to run!" << std::endl;
+        return EXIT_FAILURE;
     }
 
-    std::string programName = argv[1];
+    std::string program = argv[1];
+    std::string myxcookie = std::string(getenv("HOME")) + "/my-x-cookie";
 
-    // Validate the program name input
-    if (!isValidProgramName(programName)) {
-        handleError("Invalid characters in program name.");
+    // Set environment variables for Wayland and Qt
+    setenv("QT_QPA_PLATFORMTHEME", "qt5ct", 1);
+    setenv("QT_QPA_PLATFORM", "wayland;xcb", 1);
+
+    // Try to find Wayland display
+    std::string waylandDisplay = findWaylandDisplay();
+    if (!waylandDisplay.empty()) {
+        setenv("WAYLAND_DISPLAY", waylandDisplay.c_str(), 1);
+        std::cout << "[))> Wayland display set to: " << waylandDisplay << std::endl;
+    } else {
+        std::cout << "[))> No Wayland display found. Falling back to X11." << std::endl;
     }
 
-    // Check if the program exists in the system using access()
-    if (access(("/usr/bin/" + programName).c_str(), X_OK) != 0) {
-        handleError("Command " + programName + " not found!");
+    // Check if sudo is available
+    std::string sudoCheck = execCommand("which sudo");
+    if (sudoCheck.empty()) {
+        std::cout << "[))> No sudo installed. Using xhost method." << std::endl;
+        createXauth(myxcookie);
+        runWithXauth(myxcookie, program);
+    } else {
+        // Run the program with sudo environment variables
+        std::string sudoCommand = "sudo -E " + program;
+        int result = system(sudoCommand.c_str());
+        if (result != 0) {
+            std::cout << "[))> Program failed with sudo. Falling back to xhost method." << std::endl;
+            createXauth(myxcookie);
+            runWithXauth(myxcookie, program);
+        }
     }
 
-    std::cout << "suway-ng for program: " << programName << std::endl;
-
-    // Kill processes matching the given program name
-    killProcesses(programName);
-
-    // Run the program with sudo privileges
-    runWithSudo(programName);
-
-    // Clear environment variables holding sensitive data
-    unsetenv("PASSWORD");
-
+    // Clean up sensitive data
+    std::cout << "[))> Program execution finished." << std::endl;
     return 0;
 }
