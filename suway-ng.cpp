@@ -1,200 +1,171 @@
-// SPDX-License-Identifier: MIT
-// Maintainer: [NAZY-OS]
-// This program validates a user's password against the system's password database 
-// and executes a specified command with appropriate display access, 
-// supporting both Wayland and X11 environments.
-
 #include <iostream>
 #include <cstdlib>
-#include <cstring>
 #include <unistd.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <stdexcept>
-#include <string>
-#include <vector>
+#include <cstring>
 #include <termios.h>
+#include <sys/types.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <pwd.h>
-#include <crypt.h>
 #include <fstream>
-#include <X11/Xlib.h>
-#include <X11/Xauth.h>
-#include <wayland-client.h>
 
-constexpr size_t MAX_PASSWORD_LENGTH = 128; // Max password length
+using namespace std;
 
-// Function to read password securely
-std::string read_password() {
+// Function to display help message
+void displayHelp() {
+    cout << "Usage: suway-ng <program-name> [program-args...]" << endl;
+    cout << "Run a specified program with the appropriate permissions." << endl;
+    cout << "Options:" << endl;
+    cout << "  -h, --help    Show this help message and exit." << endl;
+    cout << endl;
+    cout << "Example:" << endl;
+    cout << "  suway-ng my_program -arg1 -arg2" << endl;
+}
+
+// Function to securely read password with asterisks
+string readPassword() {
     struct termios oldt, newt;
-    std::string password;
+    int ch;
+    string password;
 
-    // Get current terminal settings
+    // Turn echoing off
     tcgetattr(STDIN_FILENO, &oldt);
     newt = oldt;
-    newt.c_lflag &= ~(ECHO); // Disable echo
-    tcsetattr(STDIN_FILENO, TCSANOW, &newt); // Apply new settings
+    newt.c_lflag &= ~ECHO;
+    tcsetattr(STDIN_FILENO, TCSANOW, &newt);
 
-    std::cout << "[))> Enter passphrase: ";
-    
-    char ch;
-    while (std::cin.get(ch) && ch != '\n') {
-        if (ch == 127) { // Backspace handling
+    cout << "[))> Enter passphrase: ";
+    while ((ch = getchar()) != '\n' && ch != EOF) {
+        if (ch == 127) {  // Handle backspace
             if (!password.empty()) {
+                cout << "\b \b";
                 password.pop_back();
-                std::cout << "\b \b"; // Remove last character
             }
-        } else if (password.length() < MAX_PASSWORD_LENGTH) { // Prevent overflow
-            password += ch;
-            std::cout << '*'; // Display asterisk
+        } else {
+            password.push_back(ch);
+            cout << '*';  // Display asterisks
         }
     }
-    std::cout << std::endl;
 
-    // Restore terminal settings
+    cout << endl;
+
+    // Restore echoing
     tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
     return password;
 }
 
-// Function to validate password
-bool validate_password(const std::string& username, const std::string& password) {
-    struct passwd* pwd = getpwnam(username.c_str());
-    if (!pwd) {
-        std::cerr << "[))> User not found: " << username << std::endl;
+// Function to set environment variables
+void setEnvironmentVariables(const string& display) {
+    setenv("DISPLAY", display.c_str(), 1);
+    setenv("QT_QPA_PLATFORMTHEME", "qt5ct", 1);
+    setenv("QT_QPA_PLATFORM", "wayland;xcb", 1);
+}
+
+// Function to create X authority using xauth
+bool createXauthCookie(const string& myxcookie) {
+    string cmd = "xauth add $(uname -n)${DISPLAY} . $(xxd -l 16 -p /dev/urandom)";
+    string cmd_extract = "xauth extract " + myxcookie + " $(uname -n)${DISPLAY}";
+
+    if (system(cmd.c_str()) != 0 || system(cmd_extract.c_str()) != 0) {
+        cerr << "[))> Error creating xauth cookie!" << endl;
         return false;
     }
-    
-    // Hash input password and compare
-    std::string hashed_input = crypt(password.c_str(), pwd->pw_passwd);
-    return (hashed_input == pwd->pw_passwd);
+
+    string cmd_setfacl = "setfacl -m u:" + string(getenv("USER")) + ":r " + myxcookie;
+    if (system(cmd_setfacl.c_str()) != 0) {
+        cerr << "[))> Error setting file permissions for xcookie!" << endl;
+        return false;
+    }
+
+    string cmd_merge = "xauth merge " + myxcookie;
+    if (system(cmd_merge.c_str()) != 0) {
+        cerr << "[))> Error merging xauth cookie!" << endl;
+        return false;
+    }
+
+    return true;
 }
 
-// Function to execute a command
-void execute_command(const std::vector<std::string>& cmd) {
-    pid_t pid = fork();
-    if (pid == 0) { // Child process
-        std::vector<char*> argv;
-        for (const auto& arg : cmd) {
-            argv.push_back(const_cast<char*>(arg.c_str())); // Convert to char*
+// Function to run a command using sudo
+bool runWithSudo(const string& command, const string& password) {
+    string sudoCommand = "echo " + password + " | sudo -E -S bash -c '" + command + "'";
+    return system(sudoCommand.c_str()) == 0;
+}
+
+// Function to run a command using xhost method
+bool runWithXhost(const string& command, const string& myxcookie, const string& password) {
+    if (!createXauthCookie(myxcookie)) {
+        return false;
+    }
+
+    string suCommand = "echo " + password + " | su -c '" + command + "'";
+    return system(suCommand.c_str()) == 0;
+}
+
+// Function to clean up environment and sensitive data
+void cleanUp(const string& myxcookie) {
+    unsetenv("DISPLAY");
+    unsetenv("QT_QPA_PLATFORMTHEME");
+    unsetenv("QT_QPA_PLATFORM");
+
+    remove(myxcookie.c_str());  // Remove the X cookie file
+}
+
+// Function to kill processes with a matching name
+void killProcesses(const string& processName) {
+    string killCmd = "ps -ef | grep -E \"" + processName + "\" | grep -v grep | awk '{print $2}' | xargs kill -9";
+    system(killCmd.c_str());
+}
+
+int main(int argc, char *argv[]) {
+    if (argc < 2) {
+        cerr << "[))> No program name provided!" << endl;
+        displayHelp();
+        return 1;
+    }
+
+    // Display help if requested
+    string firstArg = argv[1];
+    if (firstArg == "-h" || firstArg == "--help") {
+        displayHelp();
+        return 0;
+    }
+
+    string main_program = firstArg;
+    string myxcookie = string(getenv("HOME")) + "/my-x-cookie";
+
+    // Set environment variables
+    setEnvironmentVariables(string(getenv("DISPLAY")));
+
+    // Read the password from the user
+    string password = readPassword();
+
+    // Prepare command to run
+    string command = main_program;
+    for (int i = 2; i < argc; ++i) {
+        command += " ";
+        command += argv[i];
+    }
+
+    // First try to run with sudo
+    if (!runWithSudo(command, password)) {
+        cerr << "[))> Failed to run with sudo, trying xhost method!" << endl;
+        if (!runWithXhost(command, myxcookie, password)) {
+            cerr << "[))> Both sudo and xhost methods failed!" << endl;
+            cleanUp(myxcookie);
+            return 1;
         }
-        argv.push_back(nullptr); // Null-terminate the argument list
-        
-        execvp(argv[0], argv.data()); // Execute command
-        perror("Execution failed"); // Handle execution error
-        exit(EXIT_FAILURE);
-    } else if (pid < 0) { // Fork failed
-        perror("Fork failed");
-        exit(EXIT_FAILURE);
-    } else { // Parent process
-        int status;
-        waitpid(pid, &status, 0); // Wait for child to finish
-        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-            throw std::runtime_error("Command execution failed");
-        }
-    }
-}
-
-// Function to manage X11 authentication
-void manage_xauth(const std::string& cookie_path) {
-    Display* display = XOpenDisplay(nullptr);
-    if (!display) throw std::runtime_error("Unable to open X display");
-
-    // Create or update .Xauthority
-    Xauth* auth = XauGetBestAuthByAddr(nullptr, DefaultScreen(display), nullptr, 0);
-    if (!auth) {
-        XCloseDisplay(display);
-        throw std::runtime_error("Failed to get Xauth entry");
     }
 
-    // Open .Xauthority in append mode
-    FILE* xauth_file = fopen(cookie_path.c_str(), "ab");
-    if (!xauth_file) {
-        XFree(auth);
-        XCloseDisplay(display);
-        throw std::runtime_error("Failed to open X authority file");
-    }
+    // Kill matching processes
+    killProcesses(main_program);
 
-    // Write authentication data
-    if (XauWriteAuth(xauth_file, auth) < 0) {
-        fclose(xauth_file);
-        XFree(auth);
-        XCloseDisplay(display);
-        throw std::runtime_error("Failed to write to X authority file");
-    }
+    // Clean up and remove sensitive data
+    cleanUp(myxcookie);
+    password.clear();  // Clear password from memory
 
-    fclose(xauth_file);
-    XFree(auth);
-    XCloseDisplay(display);
-}
-
-// Function to connect to Wayland
-void connect_to_wayland() {
-    struct wl_display* display = wl_display_connect(nullptr);
-    if (!display) throw std::runtime_error("Failed to connect to Wayland display");
-    std::cout << "[))> Successfully connected to Wayland!" << std::endl;
-    
-    // Placeholder for future Wayland functionalities
-    wl_display_disconnect(display); // Clean up
-}
-
-// Function to check if a command exists in the PATH
-bool command_exists(const std::string& cmd) {
-    return system(("command -v " + cmd + " > /dev/null 2>&1").c_str()) == 0;
-}
-
-// Main function
-int main(int argc, char* argv[]) {
-    if (argc < 2) { // Check for command argument
-        std::cerr << "[))> No program found to run!" << std::endl;
-        return EXIT_FAILURE;
-    }
-
-    std::string program = argv[1];
-    char* username_env = getenv("USER"); // Get current username
-    if (!username_env) {
-        std::cerr << "[))> USER environment variable not set." << std::endl;
-        return EXIT_FAILURE;
-    }
-    std::string username = username_env;
-
-    if (!command_exists("xauth")) { // Check for xauth
-        std::cerr << "[))> Missing dependency: xauth" << std::endl;
-        return EXIT_FAILURE;
-    }
-
-    // Read password securely
-    std::string password = read_password();
-
-    // Validate user password
-    if (!validate_password(username, password)) {
-        std::cerr << "[))> Invalid password!" << std::endl;
-        return EXIT_FAILURE;
-    }
-
-    // Manage X11 authentication
-    std::string cookie_path = std::string(getenv("HOME")) + "/.Xauthority";
-    try {
-        manage_xauth(cookie_path);
-    } catch (const std::runtime_error& e) {
-        std::cerr << "[))> Error: " << e.what() << std::endl;
-        return EXIT_FAILURE;
-    }
-
-    // Connect to Wayland
-    try {
-        connect_to_wayland();
-    } catch (const std::runtime_error& e) {
-        std::cerr << "[))> Error: " << e.what() << std::endl;
-        return EXIT_FAILURE;
-    }
-
-    // Prepare and execute the command
-    try {
-        execute_command({program});
-        std::cout << "[))> Execution finished successfully!" << std::endl;
-    } catch (const std::runtime_error& e) {
-        std::cerr << "[))> Error: " << e.what() << std::endl;
-        return EXIT_FAILURE;
-    }
-
-    return EXIT_SUCCESS;
+    cout << "[))> Program executed successfully!" << endl;
+    return 0;
 }
