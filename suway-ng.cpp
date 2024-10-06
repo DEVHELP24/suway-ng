@@ -59,8 +59,12 @@ string readPassword() {
 // Function to set environment variables
 void setEnvironmentVariables(const string& display) {
     setenv("DISPLAY", display.c_str(), 1);
-    setenv("QT_QPA_PLATFORMTHEME", "qt5ct", 1);
-    setenv("QT_QPA_PLATFORM", "wayland;xcb", 1);
+
+    // Set QT environment variables only if DISPLAY is set
+    if (!display.empty()) {
+        setenv("QT_QPA_PLATFORMTHEME", "qt5ct", 1);
+        setenv("QT_QPA_PLATFORM", "wayland;xcb", 1);
+    }
 }
 
 // Function to create X authority using xauth
